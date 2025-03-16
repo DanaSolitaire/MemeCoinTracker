@@ -2,17 +2,30 @@ from fastapi import FastAPI, HTTPException
 import aiohttp 
 import aiosqlite 
 import asyncio
-import time
-import schedule
 import textblob
 from datetime import datetime
 from threading import Thread 
 from decouple import config
-
+from fastapi.responses import RedirectResponse
+import random
 
 app = FastAPI()
-COINS = ['bitcoin']
+COINS = ['bitcoin',"ethereum","dogecoin","shiba-inu"]
 DB_FILE = "memecoins.db"
+random.seed(42)
+
+
+'''
+function: Randomly generate sentiment score for each coin by picking 10 random posts
+            from grok3_sim_posts.txt
+input: file name
+output: list of posts 
+'''
+def create_mock_posts(file_name):
+    with open(file_name,'r') as file:
+        sim_posts = file.readlines()
+    file.close()
+    return sim_posts
 
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
@@ -21,23 +34,18 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 coin_name TEXT,
                 price_usd REAL,
-                sentiment_score REAL,
+                sentiment_score TEXT,
+                sentiment_float REAL,
                 timestamp TEXT)
         """)
-        await db.close()
+
 async def get_sentiment(coin: str) -> float:
-    mock_posts = [
-        f"I love {coin}, it’s going to the moon!",
-        f"{coin} is crashing, sell now!",
-        f"Just bought some {coin}, feeling good.",
-        f"Can’t believe I missed the boat on {coin}.",
-        f"Is {coin} the next big thing?",
-        f"Lost so much money on {coin}, never again!"
-    ]
+    random.shuffle(sim_posts)
+    mock_posts = sim_posts[:10]
     post_sentiments = []
     for post in mock_posts:
         post_sentiments.append(textblob.TextBlob(post).sentiment.polarity)
-    avg_sentiment = sum(post_sentiments) / len(post_sentiments)
+    avg_sentiment = sum(post_sentiments) / len(post_sentiments) if post_sentiments else 0
     return avg_sentiment
 
 async def fetch_prices():
@@ -52,27 +60,33 @@ async def update_db():
     prices = await fetch_prices()
     async with aiosqlite.connect(DB_FILE) as db:
         for coin in COINS:
-            sentiment = await get_sentiment(coin)
-            timestamp = datetime.now().isoformat()
+            sentiment_fl = await get_sentiment(coin)
+            if sentiment_fl > 0:
+                sentiment = "Positive"
+            elif sentiment_fl < 0:
+                sentiment = "Negative"
+            else:
+                sentiment = "Neutral"
+            sentiment = sentiment
+            timestamp = datetime.now()
+            readable_ts = timestamp.strftime("%Y-%m-%d %H:%M:%S")
             await db.execute("""
-            INSERT INTO memecoins (coin_name, price_usd, sentiment_score, timestamp)
-            VALUES (?, ?, ?, ?)""",
-            (coin, prices[coin], sentiment, timestamp)
+            INSERT INTO memecoins (coin_name, price_usd, sentiment_score, sentiment_float, timestamp)
+            VALUES (?, ?, ?, ?, ?)""",
+            (coin, prices[coin], sentiment, sentiment_fl, readable_ts)
             )
             await db.commit()
 
-def run_scheduler():
-    schedule.every(1).minutes.do(lambda: app.state.loop.create_task(update_db()))
+async def run_update():
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        await update_db()
+        await asyncio.sleep(3 * 60)
 
 @app.on_event("startup")
 async def startup_event():
     await init_db()
     await update_db()
-    app.state.loop = asyncio.get_event_loop()
-    Thread(target=run_scheduler, daemon=True).start()
+    asyncio.create_task(run_update())
 
 @app.get("/memecoins")
 async def list_memecoins():
@@ -88,13 +102,11 @@ async def list_memecoins():
         rows = await cursor.fetchall()
         return [
             {
-                "coin": row[0],
-                "price": row[1],
-                "sentiment_score": row[2],
-                "last_updated": row[3]
+                f'''coin: {row[0]}, price: {row[1]}, sentiment_score: {row[2]}, last_updated: {row[3]}'''
             }
             for row in rows
         ]
+        
             
 @app.get("/memecoins/{coin}")
 async def get_memecoin(coin: str):
@@ -130,11 +142,17 @@ async def get_memecoin(coin: str):
                 for r in rows
             ]
         }
+    
+@app.get("/")
+async def redirect_to_memecoins():
+    return RedirectResponse(url="/memecoins")
 
 async def manual_update():
     await update_db()
-    return {"message": "Data updated"}
+    return {"message": "Data updated\n"}
 
 if __name__ == "__main__":
     import uvicorn
+    global sim_posts  # Declare sim_posts as global so we can access it inside main
+    sim_posts = create_mock_posts("grok3_sim_posts.txt")  # Load the posts from the file
     uvicorn.run(app, host="0.0.0.0", port=8000)
